@@ -653,10 +653,10 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
 
         if dataset == 'train':
-            print(dataset, "DA used")
+            print(dataset, "DA used", f'data from: {folder}')
             self.ds = Dataset_Aug1(folder, image_size)
         else:
-            print(dataset)
+            print(dataset,  f'data from: {folder}')
             self.ds = Dataset(folder, image_size)
 
         self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
