@@ -69,6 +69,7 @@ parser.add_argument('--remove_time_embed', action="store_true")
 parser.add_argument('--residual', action="store_true")
 parser.add_argument('--loss_type', default='l1', type=str)
 parser.add_argument('--discrete', action="store_true")
+parser.add_argument('--num_workers', default=16, type=int)
 
 
 args = parser.parse_args()
@@ -113,7 +114,8 @@ trainer = Trainer(
     fp16 = False,                       # turn on mixed precision training with apex
     results_folder = args.save_folder,
     load_path = args.load_path,
-    dataset = 'celebA'
+    dataset = 'celebA',
+    num_workers=args.num_workers,
 )
 
 trainer.train()

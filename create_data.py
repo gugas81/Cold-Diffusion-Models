@@ -19,8 +19,8 @@ def del_folder(path):
     except OSError as exc:
         pass
 
-
-CelebA_folder = '/fs/cml-datasets/CelebA-HQ/images-128/' # change this to folder which has CelebA data
+CelebA_folder = '/data/datasets/celeba/celeba/img_align_celeba'
+# CelebA_folder = '/fs/cml-datasets/CelebA-HQ/images-128/' # change this to folder which has CelebA data
 
 ############################################# MNIST ###############################################
 trainset = torchvision.datasets.MNIST(
@@ -87,10 +87,11 @@ for idx in range(len(trainset)):
     print(idx)
     img.save(root + str(label) + '/' + str(idx) + '.png')
 
-
+from tqdm import tqdm
 ############################################# CelebA ###############################################
 root_train = './root_celebA_128_train_new/'
 root_test = './root_celebA_128_test_new/'
+
 del_folder(root_train)
 create_folder(root_train)
 
@@ -100,9 +101,10 @@ create_folder(root_test)
 exts = ['jpg', 'jpeg', 'png']
 folder = CelebA_folder
 paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
-
-for idx in range(len(paths)):
+resize_img = torchvision.transforms.Resize(size=128)
+for idx in tqdm(range(len(paths))):
     img = Image.open(paths[idx])
+    img = resize_img(img)
     print(idx)
     if idx < 0.9*len(paths):
         img.save(root_train + str(idx) + '.png')

@@ -35,6 +35,7 @@ parser.add_argument('--sampling_routine', default='default', type=str,
 parser.add_argument('--remove_time_embed', action="store_true")
 parser.add_argument('--residual', action="store_true")
 parser.add_argument('--loss_type', default='l1', type=str)
+parser.add_argument('--num_workers', default=16, type=int)
 
 
 args = parser.parse_args()
@@ -60,14 +61,15 @@ diffusion = GaussianDiffusion(
 ).cuda()
 
 import torch
-diffusion = torch.nn.DataParallel(diffusion, device_ids=range(torch.cuda.device_count()))
+# diffusion = torch.nn.DataParallel(diffusion, device_ids=range(torch.cuda.device_count()))
 
 
 trainer = Trainer(
     diffusion,
-    '../deblurring-diffusion-pytorch/root_celebA_128_train_new/',
+folder=args.data_path,
+
     image_size = 128,
-    train_batch_size = 32,
+    train_batch_size = 16,
     train_lr = 2e-5,
     train_num_steps = args.train_steps,         # total training steps
     gradient_accumulate_every = 2,    # gradient accumulation steps
@@ -75,6 +77,7 @@ trainer = Trainer(
     fp16 = False,                       # turn on mixed precision training with apex
     results_folder = args.save_folder,
     load_path = args.load_path,
+    num_workers=args.num_workers,
     dataset = 'train'
 )
 

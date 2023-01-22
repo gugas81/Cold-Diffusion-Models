@@ -25,6 +25,8 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from torch import linalg as LA
 from sklearn.mixture import GaussianMixture
+import logging
+logging.basicConfig(level=logging.INFO)
 
 try:
     from apex import amp
@@ -349,7 +351,7 @@ class GaussianDiffusion(nn.Module):
         xt = img
         direct_recons = None
 
-        while (t):
+        while t:
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
             x1_bar = self.denoise_fn(img, step)
             x2_bar = self.get_x2_bar_from_xt(x1_bar, img, step)
@@ -544,6 +546,7 @@ class GaussianDiffusion(nn.Module):
 class Dataset_Aug1(data.Dataset):
     def __init__(self, folder, image_size, exts = ['jpg', 'jpeg', 'png']):
         super().__init__()
+        assert os.path.isdir(folder), f'image folder does not exist: {folder}'
         self.folder = folder
         self.image_size = image_size
         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
@@ -636,10 +639,12 @@ class Trainer(object):
         results_folder = './results',
         load_path = None,
         dataset = None,
-        shuffle=True
+        shuffle=True,
+            num_workers=16,
     ):
         super().__init__()
         self.model = diffusion_model
+        self.log = logging.getLogger('Train-noise-diff')
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
         self.update_ema_every = update_ema_every
@@ -659,7 +664,9 @@ class Trainer(object):
             print(dataset)
             self.ds = Dataset(folder, image_size)
 
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16, drop_last=True))
+        self.dl = cycle(data.DataLoader(self.ds,
+                                        batch_size = train_batch_size, shuffle=shuffle, pin_memory=True,
+                                        num_workers=num_workers, drop_last=True))
 
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
         self.step = 0
@@ -732,7 +739,10 @@ class Trainer(object):
         backwards = partial(loss_backwards, self.fp16)
 
         acc_loss = 0
+        print(f'Start train model: {self.step}')
         while self.step < self.train_num_steps:
+            if self.step ==0:
+                print(f'Start train model in loop')
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
                 data_1 = next(self.dl)
@@ -740,11 +750,10 @@ class Trainer(object):
 
                 data_1, data_2 = data_1.cuda(), data_2.cuda()
                 loss = torch.mean(self.model(data_1, data_2))
-                if self.step % 100 == 0:
-                    print(f'{self.step}: {loss.item()}')
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
-
+            if self.step % 100 == 0:
+                self.log.info(f'step={self.step}: los={loss.item()}')
             acc_loss = acc_loss + (u_loss/self.gradient_accumulate_every)
 
             self.opt.step()
@@ -753,7 +762,8 @@ class Trainer(object):
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
-            if self.step != 0 and self.step % self.save_and_sample_every == 0:
+            if  self.step % self.save_and_sample_every == 0: # self.step != 0 and
+                self.log.info(f'STEP: {self.step} save samples')
                 milestone = self.step // self.save_and_sample_every
                 batches = self.batch_size
 
@@ -761,7 +771,7 @@ class Trainer(object):
                 data_2 = torch.randn_like(data_1)
                 og_img = data_2.cuda()
 
-                xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
+                xt, direct_recons, all_images = self.ema_model.sample(batch_size=batches, img=og_img)
 
                 og_img = (og_img + 1) * 0.5
                 utils.save_image(og_img, str(self.results_folder / f'sample-og-{milestone}.png'), nrow=6)
@@ -777,16 +787,17 @@ class Trainer(object):
                                  nrow=6)
 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
-                print(f'Mean of last {self.step}: {acc_loss}')
+                self.log.info(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss=0
 
                 self.save()
                 if self.step % (self.save_and_sample_every * 100) == 0:
+                    self.log.info(f'Save model: {self.step}')
                     self.save(self.step)
 
             self.step += 1
 
-        print('training completed')
+        self.log.info('training completed')
 
     def test_from_data(self, extra_path, s_times=None):
         batches = self.batch_size
@@ -1213,7 +1224,6 @@ class Trainer(object):
 
 
     def sample_as_a_vector_pytorch_gmm_and_save(self, torch_gmm, start=0, end=1000, siz=64, ch=3, clusters=10, n_sample=10000):
-
 
         flatten = nn.Flatten()
         dataset = self.ds

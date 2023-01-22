@@ -20,7 +20,8 @@ import torchgeometry as tgm
 import glob
 import os
 from PIL import Image
-
+import logging
+logging.basicConfig(level=logging.INFO)
 
 try:
     from apex import amp
@@ -1073,9 +1074,11 @@ class Trainer(object):
         results_folder = './results',
         load_path = None,
         dataset = None,
-        shuffle=True
+        shuffle=True,
+        num_workers=16,
     ):
         super().__init__()
+        self.log = logging.getLogger('Train-deblur-diff')
         self.model = diffusion_model
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
@@ -1090,13 +1093,13 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
 
         if dataset == 'mnist' or dataset == 'cifar10' or dataset == 'flower' or dataset == 'celebA' or dataset == 'AFHQ':
-            print(dataset, "DA used")
+            self.log.info(f"{dataset}, DA used")
             self.ds = Dataset_Aug1(folder, image_size)
             self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=8,
                                 drop_last=True))
 
         elif dataset == 'LSUN_train':
-            print(dataset, "DA used")
+            self.log.info(f"{dataset}, DA used")
             transform = transforms.Compose([
                 transforms.Resize((int(image_size * 1.12), int(image_size * 1.12))),
                 transforms.RandomCrop(image_size),
@@ -1104,14 +1107,16 @@ class Trainer(object):
                 transforms.Lambda(lambda t: (t * 2) - 1)
             ])
             self.ds = torchvision.datasets.LSUN(root=folder, classes=['church_outdoor_train'], transform=transform)
-            self.dl = cycle_cat(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16,
+            self.dl = cycle_cat(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True,
+                                                num_workers=num_workers,
                                 drop_last=True))
 
 
         else:
-            print(dataset)
+            self.log.info(f"{dataset}")
             self.ds = Dataset(folder, image_size)
-            self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=16,
+            self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True,
+                                            num_workers=num_workers,
                                 drop_last=True))
 
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
@@ -1149,7 +1154,7 @@ class Trainer(object):
             torch.save(data, str(self.results_folder / f'model_{itrs}.pt'))
 
     def load(self, load_path):
-        print("Loading : ", load_path)
+        self.log.info(f"Loading : {load_path}" )
         data = torch.load(load_path)
 
         self.step = data['step']
@@ -1179,19 +1184,20 @@ class Trainer(object):
         cv2.imwrite(path, vcat)
 
 
-
     def train(self):
 
         backwards = partial(loss_backwards, self.fp16)
 
         acc_loss = 0
-        while self.step < self.train_num_steps:
+        # while self.step < self.train_num_steps:
+        for _ in tqdm(range(self.train_num_steps)):
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
                 data = next(self.dl).cuda()
                 loss = torch.mean(self.model(data)) # change for DP
                 if self.step % 100 == 0:
-                    print(f'{self.step}: {loss.item()}')
+                    complited = 100 *self.step / self.train_num_steps
+                    self.log.info(f'step={self.step}({complited: .2f}%): loss={loss.item()}')
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
 
@@ -1204,6 +1210,7 @@ class Trainer(object):
                 self.step_ema()
 
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
+                self.log.info(f"Save models: step={self.step}")
                 milestone = self.step // self.save_and_sample_every
                 batches = self.batch_size
                 og_img = next(self.dl).cuda()
@@ -1223,7 +1230,7 @@ class Trainer(object):
                                  nrow=6)
 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
-                print(f'Mean of last {self.step}: {acc_loss}')
+                self.log.info(f'Mean of last step={self.step}: loss={acc_loss}')
                 acc_loss=0
 
                 self.save()
@@ -1232,7 +1239,7 @@ class Trainer(object):
 
             self.step += 1
 
-        print('training completed')
+        self.log.info('training completed')
 
 
     def test_from_data(self, extra_path, s_times=None):
