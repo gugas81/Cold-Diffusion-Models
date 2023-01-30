@@ -9,7 +9,7 @@ import torch
 import random
 
 from deblurring_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
-from gmm_pycave import GaussianMixture as GaussianMixture
+# from gmm_pycave import GaussianMixture as GaussianMixture
 
 seed_value=123457
 torch.manual_seed(seed_value) # cpu  vars
@@ -59,6 +59,7 @@ parser.add_argument('--gmm_sample_at', default=1, type=int)
 parser.add_argument('--bs', default=32, type=int)
 parser.add_argument('--discrete', action="store_true")
 parser.add_argument('--noise', default=0, type=float)
+parser.add_argument('--num_workers', default=16, type=int)
 
 args = parser.parse_args()
 print(args)
@@ -113,7 +114,8 @@ trainer = Trainer(
     results_folder = args.save_folder,
     load_path = args.load_path,
     dataset = None,
-    shuffle=False
+    shuffle=False,
+    num_workers=args.num_workers,
 )
 
 if args.test_type == 'train_data':

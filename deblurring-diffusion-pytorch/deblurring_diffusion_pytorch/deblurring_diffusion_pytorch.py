@@ -1095,7 +1095,7 @@ class Trainer(object):
         if dataset == 'mnist' or dataset == 'cifar10' or dataset == 'flower' or dataset == 'celebA' or dataset == 'AFHQ':
             self.log.info(f"{dataset}, DA used")
             self.ds = Dataset_Aug1(folder, image_size)
-            self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=8,
+            self.dl = cycle(data.DataLoader(self.ds, batch_size=train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=num_workers,
                                 drop_last=True))
 
         elif dataset == 'LSUN_train':
