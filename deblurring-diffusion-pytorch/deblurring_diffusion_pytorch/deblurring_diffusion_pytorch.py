@@ -12,6 +12,7 @@ from pathlib import Path
 from torch.optim import Adam
 from torchvision import transforms, utils
 
+from nonlinear_wavelets_diffusion.wavelets_nonlinear_approx import WaveShrinkSampler
 import numpy as np
 from tqdm import tqdm
 from einops import rearrange
@@ -324,7 +325,10 @@ class GaussianDiffusion(nn.Module):
         blur_routine = 'Incremental',
         train_routine = 'Final',
         sampling_routine='default',
-        discrete=False
+        discrete=False,
+        wave_shrink: bool = False,
+            dataset= None,
+            device='cpu'
     ):
         super().__init__()
         self.channels = channels
@@ -343,6 +347,17 @@ class GaussianDiffusion(nn.Module):
         self.train_routine = train_routine
         self.sampling_routine = sampling_routine
         self.discrete=discrete
+        if wave_shrink:
+            self.wave_time_coeff = 10
+            self.wave_shrink: WaveShrinkSampler = WaveShrinkSampler(dataset=dataset,
+                                            wave_type='db3',
+                                            time_steps=timesteps//self.wave_time_coeff,
+                                            scale_factor=4,
+                                            scheduler_log_base=100,
+                                            device=device,
+                                            coeff_time=self.wave_time_coeff)
+        else:
+            self.wave_shrink: WaveShrinkSampler = None
 
 
 
@@ -399,46 +414,65 @@ class GaussianDiffusion(nn.Module):
         if t==None:
             t=self.num_timesteps
 
+        img_times = [img]
+        img_t = img
+
         if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t-1](img)
+            for i in range(t):
+                if self.wave_shrink is not None:
+                    img_t = self.wave_shrink.q_sample_image(img_t, t-1, norm=True)
+                else:
+                    img_t = self.gaussian_kernels[t-1](img_t)
+                img_times.append(img_t)
 
         else:
             for i in range(t):
                 with torch.no_grad():
-                    img = self.gaussian_kernels[i](img)
+                    if self.wave_shrink is not None:
+                        img_t = self.wave_shrink.q_sample_image(img_t, i, norm=True)
+                    img_t = self.gaussian_kernels[i](img_t)
+                    img_times.append(img_t)
 
-        orig_mean = torch.mean(img, [2, 3], keepdim=True)
+        orig_mean = torch.mean(img_t, [2, 3], keepdim=True)
         print(orig_mean.squeeze()[0])
 
-        temp = img
+        temp = img_t
         if self.discrete:
-            img = torch.mean(img, [2, 3], keepdim=True)
-            img = img.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
+            img_t = torch.mean(img_t, [2, 3], keepdim=True)
+            img_t = img_t.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
 
         # 3(2), 2(1), 1(0)
-        xt = img
-        direct_recons = None
+        # xt = img_t
+        direct_recons = []
+        img_recon = []
         while(t):
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
-            x = self.denoise_fn(img, step)
+            x = self.denoise_fn(img_t, step)
 
             if self.train_routine == 'Final':
-                if direct_recons == None:
-                    direct_recons = x
+
+                direct_recons.append(x)
 
                 if self.sampling_routine == 'default':
                     if self.blur_routine == 'Individual_Incremental':
+                        if self.wave_shrink is not None:
+                            x = self.wave_shrink.q_sample_image(x, t-2, norm=True)
                         x = self.gaussian_kernels[t - 2](x)
                     else:
                         for i in range(t-1):
                             with torch.no_grad():
+                                if self.wave_shrink is not None:
+                                    x = self.wave_shrink.q_sample_image(x, i, norm=True)
                                 x = self.gaussian_kernels[i](x)
 
                 elif self.sampling_routine == 'x0_step_down':
                     x_times = x
                     for i in range(t):
                         with torch.no_grad():
-                            x_times = self.gaussian_kernels[i](x_times)
+                            if self.wave_shrink is not None:
+                                x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                            else:
+                                x_times = self.gaussian_kernels[i](x_times)
                             if self.discrete:
                                 if i == (self.num_timesteps - 1):
                                     x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -447,13 +481,17 @@ class GaussianDiffusion(nn.Module):
                     x_times_sub_1 = x
                     for i in range(t - 1):
                         with torch.no_grad():
-                            x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                            if self.wave_shrink is not None:
+                                x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                            else:
+                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
-                    x = img - x_times + x_times_sub_1
-            img = x
+                    x = img_t - x_times + x_times_sub_1
+            img_t = x
+            img_recon.append(img_t)
             t = t - 1
         self.denoise_fn.train()
-        return xt, direct_recons, img
+        return img_times, direct_recons, img_recon
 
     @torch.no_grad()
     def gen_sample_2(self, batch_size=16, img=None, t=None, noise_level=0):
@@ -463,31 +501,42 @@ class GaussianDiffusion(nn.Module):
         if t == None:
             t = self.num_timesteps
 
+        img_times = [img]
+        img_t = img
         if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t - 1](img)
+            for i in range(t):
+                if self.wave_shrink is not None:
+                    img_t = self.wave_shrink.q_sample_image(img, i, norm=True)
+                else:
+                    img_t = self.gaussian_kernels[i](img_t)
+                img_times.append(img_t)
 
         else:
             for i in range(t):
                 with torch.no_grad():
-                    img = self.gaussian_kernels[i](img)
+                    if self.wave_shrink is not None:
+                        img_t = self.wave_shrink.q_sample_image(img_t, i, norm=True)
+                    else:
+                        img_t = self.gaussian_kernels[i](img_t)
+                    img_times.append(img_t)
 
         orig_mean = torch.mean(img, [2, 3], keepdim=True)
         print(orig_mean.squeeze()[0])
 
-        temp = img
+        temp = img_t
         if self.discrete:
-            img = torch.mean(img, [2, 3], keepdim=True)
-            img = img.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
+            img_t = torch.mean(img_t, [2, 3], keepdim=True)
+            img_t = img_t.expand(temp.shape[0], temp.shape[1], temp.shape[2], temp.shape[3])
 
-        noise = torch.randn_like(img) * noise_level
-        img = img + noise
+        noise = torch.randn_like(img_t) * noise_level
+        img_t = img_t + noise
 
         # 3(2), 2(1), 1(0)
-        xt = img
+        # xt = img_t
         direct_recons = None
         while (t):
             step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
-            x = self.denoise_fn(img, step)
+            x = self.denoise_fn(img_t, step)
 
             if self.train_routine == 'Final':
                 if direct_recons == None:
@@ -495,17 +544,25 @@ class GaussianDiffusion(nn.Module):
 
                 if self.sampling_routine == 'default':
                     if self.blur_routine == 'Individual_Incremental':
-                        x = self.gaussian_kernels[t - 2](x)
+                        if self.wave_shrink is not None:
+                            x = self.wave_shrink.q_sample_image(x, t-2, norm=True)
+                        else:
+                            x = self.gaussian_kernels[t - 2](x)
                     else:
                         for i in range(t - 1):
                             with torch.no_grad():
+                                if self.wave_shrink is not None:
+                                    x = self.wave_shrink.q_sample_image(x, i, norm=True)
                                 x = self.gaussian_kernels[i](x)
 
                 elif self.sampling_routine == 'x0_step_down':
                     x_times = x
                     for i in range(t):
                         with torch.no_grad():
-                            x_times = self.gaussian_kernels[i](x_times)
+                            if self.wave_shrink is not None:
+                                x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                            else:
+                                x_times = self.gaussian_kernels[i](x_times)
                             if self.discrete:
                                 if i == (self.num_timesteps - 1):
                                     x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -514,15 +571,18 @@ class GaussianDiffusion(nn.Module):
                     x_times_sub_1 = x
                     for i in range(t - 1):
                         with torch.no_grad():
-                            x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                            if self.wave_shrink is not None:
+                                x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                            else:
+                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
-                    x = img - x_times + x_times_sub_1
-            img = x
+                    x = img_t - x_times + x_times_sub_1
+            img_t = x
             t = t - 1
 
         # img = img - noise
 
-        return xt, direct_recons, img
+        return img_times, direct_recons, img_t
 
     @torch.no_grad()
     def gen_sample(self, batch_size=16, img=None, t=None, noise_level=0):
@@ -533,11 +593,16 @@ class GaussianDiffusion(nn.Module):
             t = self.num_timesteps
 
         if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t - 1](img)
+            if self.wave_shrink is not None:
+                img = self.wave_shrink.q_sample_image(img, t-1, norm=True)
+            else:
+                img = self.gaussian_kernels[t - 1](img)
 
         else:
             for i in range(t):
                 with torch.no_grad():
+                    if self.wave_shrink is not None:
+                        img = self.wave_shrink.q_sample_image(img, i, norm=True)
                     img = self.gaussian_kernels[i](img)
 
         orig_mean = torch.mean(img, [2, 3], keepdim=True)
@@ -564,17 +629,25 @@ class GaussianDiffusion(nn.Module):
 
                 if self.sampling_routine == 'default':
                     if self.blur_routine == 'Individual_Incremental':
-                        x = self.gaussian_kernels[t - 2](x)
+                        if self.wave_shrink is not None:
+                            x = self.wave_shrink.q_sample_image(x, t-2, norm=True)
+                        else:
+                            x = self.gaussian_kernels[t - 2](x)
                     else:
                         for i in range(t - 1):
                             with torch.no_grad():
+                                if self.wave_shrink is not None:
+                                    x = self.wave_shrink.q_sample_image(x, i, norm=True)
                                 x = self.gaussian_kernels[i](x)
 
                 elif self.sampling_routine == 'x0_step_down':
                     x_times = x
                     for i in range(t):
                         with torch.no_grad():
-                            x_times = self.gaussian_kernels[i](x_times)
+                            if self.wave_shrink is not None:
+                                x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                            else:
+                                x_times = self.gaussian_kernels[i](x_times)
                             if self.discrete:
                                 if i == (self.num_timesteps - 1):
                                     x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -583,7 +656,10 @@ class GaussianDiffusion(nn.Module):
                     x_times_sub_1 = x
                     for i in range(t - 1):
                         with torch.no_grad():
-                            x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                            if self.wave_shrink is not None:
+                                x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                            else:
+                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
                     x = img - x_times + x_times_sub_1
             img = x
@@ -599,10 +675,15 @@ class GaussianDiffusion(nn.Module):
             t = self.num_timesteps
 
         if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t - 1](img)
+            if self.wave_shrink is not None:
+                img = self.wave_shrink.q_sample_image(img, t-1, norm=True)
+            else:
+                img = self.gaussian_kernels[t - 1](img)
         else:
             for i in range(t):
                 with torch.no_grad():
+                    if self.wave_shrink is not None:
+                        img = self.wave_shrink.q_sample_image(img, i, norm=True)
                     img = self.gaussian_kernels[i](img)
 
         return img
@@ -619,10 +700,15 @@ class GaussianDiffusion(nn.Module):
             times = t
 
         if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t - 1](img)
+            if self.wave_shrink is not None:
+                img = self.wave_shrink.q_sample_image(img, t-1, norm=True)
+            else:
+                img = self.gaussian_kernels[t - 1](img)
         else:
             for i in range(t):
                 with torch.no_grad():
+                    if self.wave_shrink is not None:
+                        img = self.wave_shrink.q_sample_image(img, i, norm=True)
                     img = self.gaussian_kernels[i](img)
 
         X_0s = []
@@ -645,11 +731,17 @@ class GaussianDiffusion(nn.Module):
                 if self.sampling_routine == 'default':
                     if self.blur_routine == 'Individual_Incremental':
                         if times-2 >= 0:
-                            x = self.gaussian_kernels[times - 2](img)
+                            if self.wave_shrink is not None:
+                                x = self.wave_shrink.q_sample_image(img, times - 2, norm=True)
+                            else:
+                                # x = img
+                                x = self.gaussian_kernels[times - 2](img)
                     else:
                         x_times_sub_1 = x
                         for i in range(times-1):
                             with torch.no_grad():
+                                if self.wave_shrink is not None:
+                                    x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
                                 x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
                         x = x_times_sub_1
@@ -657,12 +749,19 @@ class GaussianDiffusion(nn.Module):
                 elif self.sampling_routine == 'x0_step_down':
                     if self.blur_routine == 'Individual_Incremental':
                         if times-2 >= 0:
-                            x = self.gaussian_kernels[times - 2](img)
+                            if self.wave_shrink is not None:
+                                x = self.wave_shrink.q_sample_image(img, times - 2, norm=True)
+                            else:
+                                # x = img
+                                x = self.gaussian_kernels[times - 2](img)
                     else:
                         x_times = x
                         for i in range(times):
                             with torch.no_grad():
-                                x_times = self.gaussian_kernels[i](x_times)
+                                if self.wave_shrink is not None:
+                                    x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                                else:
+                                    x_times = self.gaussian_kernels[i](x_times)
                                 if self.discrete:
                                     if i == (self.num_timesteps - 1):
                                         x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -672,7 +771,10 @@ class GaussianDiffusion(nn.Module):
                         x_times_sub_1 = x
                         for i in range(times - 1):
                             with torch.no_grad():
-                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                                if self.wave_shrink is not None:
+                                    x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                                else:
+                                    x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
                         x = img - x_times + x_times_sub_1
                         #x = x - (noise/self.num_timesteps)
@@ -704,10 +806,15 @@ class GaussianDiffusion(nn.Module):
         Forward.append(img)
 
         if self.blur_routine == 'Individual_Incremental':
-            img = self.gaussian_kernels[t - 1](img)
+            if self.wave_shrink is not None:
+                img = self.wave_shrink.q_sample_image(img, t-1, norm=True)
+            else:
+                img = self.gaussian_kernels[t - 1](img)
         else:
             for i in range(t):
                 with torch.no_grad():
+                    if self.wave_shrink is not None:
+                        img = self.wave_shrink.q_sample_image(img, i, norm=True)
                     img = self.gaussian_kernels[i](img)
                     Forward.append(img)
 
@@ -732,11 +839,17 @@ class GaussianDiffusion(nn.Module):
                 if self.sampling_routine == 'default':
                     if self.blur_routine == 'Individual_Incremental':
                         if times - 2 >= 0:
-                            x = self.gaussian_kernels[times - 2](img)
+                            if self.wave_shrink is not None:
+                                x = self.wave_shrink.q_sample_image(img, times - 2 , norm=True)
+                            else:
+                                # x = img
+                                x = self.gaussian_kernels[times - 2](img)
                     else:
                         x_times_sub_1 = x
                         for i in range(times - 1):
                             with torch.no_grad():
+                                if self.wave_shrink is not None:
+                                    x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
                                 x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
                         x = x_times_sub_1
@@ -744,12 +857,19 @@ class GaussianDiffusion(nn.Module):
                 elif self.sampling_routine == 'x0_step_down':
                     if self.blur_routine == 'Individual_Incremental':
                         if times - 2 >= 0:
-                            x = self.gaussian_kernels[times - 2](img)
+                            if self.wave_shrink is not None:
+                                x = self.wave_shrink.q_sample_image(img, times - 2, norm=True)
+                            else:
+                                # x=img
+                                x = self.gaussian_kernels[times - 2](img)
                     else:
                         x_times = x
                         for i in range(times):
                             with torch.no_grad():
-                                x_times = self.gaussian_kernels[i](x_times)
+                                if self.wave_shrink is not None:
+                                    x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                                else:
+                                    x_times = self.gaussian_kernels[i](x_times)
                                 if self.discrete:
                                     if i == (self.num_timesteps - 1):
                                         x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -759,7 +879,10 @@ class GaussianDiffusion(nn.Module):
                         x_times_sub_1 = x
                         for i in range(times - 1):
                             with torch.no_grad():
-                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                                if self.wave_shrink is not None:
+                                    x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                                else:
+                                    x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
                         x = img - x_times + x_times_sub_1
                         # x = x - (noise/self.num_timesteps)
@@ -785,7 +908,10 @@ class GaussianDiffusion(nn.Module):
 
         for i in range(times):
             with torch.no_grad():
-                img = self.gaussian_kernels[i](img)
+                if self.wave_shrink is not None:
+                    img = self.wave_shrink.q_sample_image(img, i, norm=True)
+                else:
+                    img = self.gaussian_kernels[i](img)
                 Forward.append(img)
 
         Backward_1 = []
@@ -806,7 +932,10 @@ class GaussianDiffusion(nn.Module):
             x_times = x
             for i in range(times):
                 with torch.no_grad():
-                    x_times = self.gaussian_kernels[i](x_times)
+                    if self.wave_shrink is not None:
+                        x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                    else:
+                        x_times = self.gaussian_kernels[i](x_times)
                     if self.discrete:
                         if i == (self.num_timesteps - 1):
                             x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -816,7 +945,10 @@ class GaussianDiffusion(nn.Module):
             x_times_sub_1 = x
             for i in range(times - 1):
                 with torch.no_grad():
-                    x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                    if self.wave_shrink is not None:
+                        x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                    else:
+                        x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
             x = img - img + x_times_sub_1
 
@@ -840,7 +972,10 @@ class GaussianDiffusion(nn.Module):
             x_times = x
             for i in range(times):
                 with torch.no_grad():
-                    x_times = self.gaussian_kernels[i](x_times)
+                    if self.wave_shrink is not None:
+                        x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                    else:
+                        x_times = self.gaussian_kernels[i](x_times)
                     if self.discrete:
                         if i == (self.num_timesteps - 1):
                             x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -850,7 +985,10 @@ class GaussianDiffusion(nn.Module):
             x_times_sub_1 = x
             for i in range(times - 1):
                 with torch.no_grad():
-                    x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                    if self.wave_shrink is not None:
+                        x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                    else:
+                        x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
             x = img - x_times + x_times_sub_1
 
@@ -877,7 +1015,10 @@ class GaussianDiffusion(nn.Module):
 
         for i in range(start, t):
             with torch.no_grad():
-                img = self.gaussian_kernels[i](img)
+                if self.wave_shrink is not None:
+                    img = self.wave_shrink.q_sample_image(img, i, norm=True)
+                else:
+                    img = self.gaussian_kernels[i](img)
 
 
         temp = img
@@ -898,17 +1039,26 @@ class GaussianDiffusion(nn.Module):
 
                 if self.sampling_routine == 'default':
                     if self.blur_routine == 'Individual_Incremental':
-                        x = self.gaussian_kernels[t - 2](x)
+                        if self.wave_shrink is not None:
+                            x = self.wave_shrink.q_sample_image(x, t-2, norm=True)
+                        else:
+                            x = self.gaussian_kernels[t - 2](x)
                     else:
                         for i in range(t - 1):
                             with torch.no_grad():
-                                x = self.gaussian_kernels[i](x)
+                                if self.wave_shrink is not None:
+                                    x = self.wave_shrink.q_sample_image(x, i, norm=True)
+                                else:
+                                    x = self.gaussian_kernels[i](x)
 
                 elif self.sampling_routine == 'x0_step_down':
                     x_times = x
                     for i in range(t):
                         with torch.no_grad():
-                            x_times = self.gaussian_kernels[i](x_times)
+                            if self.wave_shrink is not None:
+                                x_times = self.wave_shrink.q_sample_image(x_times, i, norm=True)
+                            else:
+                                x_times = self.gaussian_kernels[i](x_times)
                             if self.discrete:
                                 if i == (self.num_timesteps - 1):
                                     x_times = torch.mean(x_times, [2, 3], keepdim=True)
@@ -917,7 +1067,10 @@ class GaussianDiffusion(nn.Module):
                     x_times_sub_1 = x
                     for i in range(t - 1):
                         with torch.no_grad():
-                            x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
+                            if self.wave_shrink is not None:
+                                x_times_sub_1 = self.wave_shrink.q_sample_image(x_times_sub_1, i, norm=True)
+                            else:
+                                x_times_sub_1 = self.gaussian_kernels[i](x_times_sub_1)
 
                     x = img - x_times + x_times_sub_1
             img = x
@@ -932,13 +1085,17 @@ class GaussianDiffusion(nn.Module):
         max_iters = torch.max(t)
         all_blurs = []
         x = x_start
-        for i in range(max_iters+1):
-            with torch.no_grad():
-                x = self.gaussian_kernels[i](x)
-                if self.discrete:
-                    if i == (self.num_timesteps-1):
-                        x = torch.mean(x, [2, 3], keepdim=True)
-                        x = x.expand(x_start.shape[0], x_start.shape[1], x_start.shape[2], x_start.shape[3])
+        with torch.no_grad():
+
+            for i in range(max_iters+1):
+                if self.wave_shrink is not None:
+                    x = self.wave_shrink.q_sample_image(x, t, norm=True)
+                else:
+                    x = self.gaussian_kernels[i](x)
+                    if self.discrete:
+                        if i == (self.num_timesteps-1):
+                            x = torch.mean(x, [2, 3], keepdim=True)
+                            x = x.expand(x_start.shape[0], x_start.shape[1], x_start.shape[2], x_start.shape[3])
                 all_blurs.append(x)
 
         all_blurs = torch.stack(all_blurs)
@@ -1209,25 +1366,38 @@ class Trainer(object):
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
-            if self.step != 0 and self.step % self.save_and_sample_every == 0:
+            if self.step % self.save_and_sample_every == 0:
                 self.log.info(f"Save models: step={self.step}")
                 milestone = self.step // self.save_and_sample_every
+                res_dir = os.path.join(self.results_folder, f'step_{milestone}')
+                os.makedirs(res_dir, exist_ok=True)
+
                 batches = self.batch_size
                 og_img = next(self.dl).cuda()
-                xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img) # change for DP
+                # img_times, direct_recons, img_t
+                img_times, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img) # change for DP
 
                 og_img = (og_img + 1) * 0.5
-                utils.save_image(og_img, str(self.results_folder / f'sample-og-{milestone}.png'), nrow=6)
+                utils.save_image(og_img, os.path.join(res_dir, f'sample-org-{milestone}.png'), nrow=6)
 
                 all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
+                utils.save_image(all_images, os.path.join(res_dir, f'sample-recon-{milestone}.png'), nrow = 6)
 
                 direct_recons = (direct_recons + 1) * 0.5
-                utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
+                utils.save_image(direct_recons, os.path.join(res_dir, f'sample-direct_recons-{milestone}.png'), nrow=6)
 
-                xt = (xt + 1) * 0.5
-                utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
-                                 nrow=6)
+                for i in range(len(img_times) //10):
+                    time_step = i * 10
+                    xt = img_times[time_step]
+                    xt = (xt + 1) * 0.5
+                    utils.save_image(xt, os.path.join(res_dir, f'sample-xt-t_{time_step}-{milestone}.png'),
+                                     nrow=6)
+
+                for time_step in range(10):
+                    xt = img_times[time_step]
+                    xt = (xt + 1) * 0.5
+                    utils.save_image(xt, os.path.join(res_dir, f'sample-xt-t_{time_step}-{milestone}.png'),
+                                     nrow=6)
 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
                 self.log.info(f'Mean of last step={self.step}: loss={acc_loss}')

@@ -1,5 +1,5 @@
 #from comet_ml import Experiment
-from deblurring_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+from deblurring_diffusion_pytorch import Unet, GaussianDiffusion, Trainer, Dataset_Aug1
 import torchvision
 import os
 import errno
@@ -84,6 +84,9 @@ model = Unet(
     residual=args.residual
 ).cuda()
 
+
+data_set = Dataset_Aug1(args.data_path, image_size = 128)
+
 diffusion = GaussianDiffusion(
     model,
     image_size = 128,
@@ -96,10 +99,14 @@ diffusion = GaussianDiffusion(
     blur_routine=args.blur_routine,
     train_routine = args.train_routine,
     sampling_routine = args.sampling_routine,
-    discrete=args.discrete
+    discrete=args.discrete,
+    wave_shrink=False,
+    dataset= data_set,
+    device='cuda'
 ).cuda()
 
 import torch
+
 diffusion = torch.nn.DataParallel(diffusion, device_ids=range(torch.cuda.device_count()))
 
 trainer = Trainer(
