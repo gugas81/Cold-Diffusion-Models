@@ -1380,23 +1380,40 @@ class Trainer(object):
                 og_img = (og_img + 1) * 0.5
                 utils.save_image(og_img, os.path.join(res_dir, f'sample-org-{milestone}.png'), nrow=6)
 
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, os.path.join(res_dir, f'sample-recon-{milestone}.png'), nrow = 6)
-
-                direct_recons = (direct_recons + 1) * 0.5
-                utils.save_image(direct_recons, os.path.join(res_dir, f'sample-direct_recons-{milestone}.png'), nrow=6)
+                # all_images = (all_images + 1) * 0.5
+                # utils.save_image(all_images, os.path.join(res_dir, f'sample-recon-{milestone}.png'), nrow = 6)
+                #
+                # direct_recons = (direct_recons + 1) * 0.5
+                # utils.save_image(direct_recons, os.path.join(res_dir, f'sample-direct_recons-{milestone}.png'), nrow=6)
 
                 for i in range(len(img_times) //10):
                     time_step = i * 10
                     xt = img_times[time_step]
+                    xt_recon = all_images[time_step]
+                    xt_direct_recon = direct_recons[time_step]
                     xt = (xt + 1) * 0.5
+                    xt_recon = (xt_recon + 1) * 0.5
+                    xt_direct_recon = (xt_direct_recon + 1) * 0.5
                     utils.save_image(xt, os.path.join(res_dir, f'sample-xt-t_{time_step}-{milestone}.png'),
+                                     nrow=6)
+                    utils.save_image(xt_recon, os.path.join(res_dir, f'sample-recon-t_{time_step}-{milestone}.png'),
+                                     nrow=6)
+                    utils.save_image(xt_direct_recon, os.path.join(res_dir, f'sample-direct_recon-t_{time_step}-{milestone}.png'),
                                      nrow=6)
 
                 for time_step in range(10):
                     xt = img_times[time_step]
+                    xt_recon = all_images[time_step]
+                    xt_direct_recon = direct_recons[time_step]
                     xt = (xt + 1) * 0.5
+                    xt_recon = (xt_recon + 1) * 0.5
+                    xt_direct_recon = (xt_direct_recon + 1) * 0.5
                     utils.save_image(xt, os.path.join(res_dir, f'sample-xt-t_{time_step}-{milestone}.png'),
+                                     nrow=6)
+                    utils.save_image(xt_recon, os.path.join(res_dir, f'sample-recon-t_{time_step}-{milestone}.png'),
+                                     nrow=6)
+                    utils.save_image(xt_direct_recon,
+                                     os.path.join(res_dir, f'sample-direct_recon-t_{time_step}-{milestone}.png'),
                                      nrow=6)
 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)

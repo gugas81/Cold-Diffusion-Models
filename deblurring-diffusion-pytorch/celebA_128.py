@@ -100,7 +100,7 @@ diffusion = GaussianDiffusion(
     train_routine = args.train_routine,
     sampling_routine = args.sampling_routine,
     discrete=args.discrete,
-    wave_shrink=False,
+    wave_shrink=True,
     dataset= data_set,
     device='cuda'
 ).cuda()
