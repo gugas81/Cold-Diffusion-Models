@@ -457,7 +457,8 @@ class GaussianDiffusion(nn.Module):
                     if self.blur_routine == 'Individual_Incremental':
                         if self.wave_shrink is not None:
                             x = self.wave_shrink.q_sample_image(x, t-2, norm=False)
-                        x = self.gaussian_kernels[t - 2](x)
+                        else:
+                            x = self.gaussian_kernels[t - 2](x)
                     else:
                         for i in range(t-1):
                             with torch.no_grad():
