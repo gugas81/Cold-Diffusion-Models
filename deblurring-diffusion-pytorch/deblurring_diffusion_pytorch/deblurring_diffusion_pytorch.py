@@ -325,6 +325,7 @@ class GaussianDiffusion(nn.Module):
         blur_routine = 'Incremental',
         train_routine = 'Final',
         sampling_routine='default',
+        wave_type: str ='db3',
         discrete=False,
         wave_shrink: bool = False,
             dataset= None,
@@ -350,7 +351,7 @@ class GaussianDiffusion(nn.Module):
         if wave_shrink:
             self.wave_time_coeff = 1
             self.wave_shrink: WaveShrinkSampler = WaveShrinkSampler(dataset=dataset,
-                                            wave_type='db3',
+                                            wave_type=wave_type,
                                             time_steps=timesteps//self.wave_time_coeff,
                                             scale_factor=4,
                                             scheduler_log_base=100,
