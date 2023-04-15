@@ -102,7 +102,8 @@ diffusion = GaussianDiffusion(
     discrete=args.discrete,
     wave_shrink=True,
     dataset= data_set,
-    device='cuda'
+    device='cuda',
+    wave_type='haar'
 ).cuda()
 
 import torch
