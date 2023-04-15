@@ -213,9 +213,10 @@ class Unet(nn.Module):
         residual = False
     ):
         super().__init__()
+        self.log = logging.getLogger('Unet-Model')
         self.channels = channels
         self.residual = residual
-        print("Is Time embed used ? ", with_time_emb)
+        self.log.info(f"Time embed: {with_time_emb}, Residual: {self.residual}")
 
         dims = [channels, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -321,7 +322,7 @@ def cosine_beta_schedule(timesteps, s = 0.008):
 
 import torch
 import torchvision
-
+from nonlinear_wavelets_diffusion.wavelets_nonlinear_approx import WaveShrinkSampler
 class GaussianDiffusion(nn.Module):
     def __init__(
         self,
@@ -334,9 +335,14 @@ class GaussianDiffusion(nn.Module):
         loss_type = 'l1',
         resolution_routine = 'Incremental',
         train_routine = 'Final',
-        sampling_routine='default'
+        sampling_routine='default',
+            wave_type='haar',
+            dataset=None,
+        shrink_waves =False
     ):
         super().__init__()
+        self.log = logging.getLogger(f'Diffusion-model: shrink_waves={shrink_waves}, wave_type={wave_type}')
+        self.shrink_waves = shrink_waves
         self.channels = channels
         self.image_size = image_size
         self.denoise_fn = denoise_fn
@@ -347,6 +353,17 @@ class GaussianDiffusion(nn.Module):
         self.resolution_routine = resolution_routine
 
         to_torch = partial(torch.tensor, dtype=torch.float32)
+        if shrink_waves:
+            self.wave_shrink_sampler: WaveShrinkSampler = WaveShrinkSampler(dataset=dataset,
+                                                                             scale_factor=4,
+                                                                             time_steps=timesteps,
+                                                                             wave_type=wave_type,
+                                                                             scheduler_log_base=10,
+                                                                             top_val_type='std_3',
+                                                                            device='cuda')
+        else:
+            self.wave_shrink_sampler: WaveShrinkSampler = None
+
         self.func = self.get_funcs()
         self.train_routine = train_routine
         self.sampling_routine = sampling_routine
@@ -389,51 +406,82 @@ class GaussianDiffusion(nn.Module):
     def get_funcs(self):
         all_funcs = []
         for i in range(self.num_timesteps):
-            if self.resolution_routine == 'Incremental':
-                all_funcs.append((lambda img, d=i, mode='bicubic': self.transform_func(img, d, mode)))
-            elif self.resolution_routine == 'Incremental_bilinear':
-                all_funcs.append((lambda img, d=i, mode='bilinear': self.transform_func(img, d, mode)))
-            elif self.resolution_routine == 'Incremental_area':
-                all_funcs.append((lambda img, d=i, mode='area': self.transform_func(img, d, mode)))
+            if self.shrink_waves:
+                all_funcs.append((lambda img, t=i: self.wave_shrink_sampler.q_sample_image(img, t)))
+            else:
+                if self.resolution_routine == 'Incremental':
+                    all_funcs.append((lambda img, d=i, mode='bicubic': self.transform_func(img, d, mode)))
+                elif self.resolution_routine == 'Incremental_bilinear':
+                    all_funcs.append((lambda img, d=i, mode='bilinear': self.transform_func(img, d, mode)))
+                elif self.resolution_routine == 'Incremental_area':
+                    all_funcs.append((lambda img, d=i, mode='area': self.transform_func(img, d, mode)))
 
-            elif self.resolution_routine == 'Incremental_bicubic_with_blur':
-                all_funcs.append((lambda img, d=i, mode='bicubic', do_blur=True: self.transform_func(img, d, mode, do_blur)))
-            elif self.resolution_routine == 'Incremental_bilinear_with_blur':
-                all_funcs.append((lambda img, d=i, mode='bilinear', do_blur=True: self.transform_func(img, d, mode, do_blur)))
-            elif self.resolution_routine == 'Incremental_area_with_blur':
-                all_funcs.append((lambda img, d=i, mode='area', do_blur=True: self.transform_func(img, d, mode, do_blur)))
+                elif self.resolution_routine == 'Incremental_bicubic_with_blur':
+                    all_funcs.append((lambda img, d=i, mode='bicubic', do_blur=True: self.transform_func(img, d, mode, do_blur)))
+                elif self.resolution_routine == 'Incremental_bilinear_with_blur':
+                    all_funcs.append((lambda img, d=i, mode='bilinear', do_blur=True: self.transform_func(img, d, mode, do_blur)))
+                elif self.resolution_routine == 'Incremental_area_with_blur':
+                    all_funcs.append((lambda img, d=i, mode='area', do_blur=True: self.transform_func(img, d, mode, do_blur)))
 
-            ## factor 2
-            elif self.resolution_routine == 'Incremental_factor_2':
-                all_funcs.append((lambda img, d=self.image_size -self.image_size // 2**(i+1), mode='bicubic': self.transform_func(img, d, mode)))
-            elif self.resolution_routine == 'Incremental_bilinear_factor_2':
-                all_funcs.append((lambda img, d=self.image_size -self.image_size // 2**(i+1), mode='bilinear': self.transform_func(img, d, mode)))
-            elif self.resolution_routine == 'Incremental_area_factor_2':
-                all_funcs.append((lambda img, d=self.image_size -self.image_size // 2**(i+1), mode='area': self.transform_func(img, d, mode)))
+                ## factor 2
+                elif self.resolution_routine == 'Incremental_factor_2':
+                    all_funcs.append((lambda img, d=self.image_size -self.image_size // 2**(i+1), mode='bicubic': self.transform_func(img, d, mode)))
+                elif self.resolution_routine == 'Incremental_bilinear_factor_2':
+                    all_funcs.append((lambda img, d=self.image_size -self.image_size // 2**(i+1), mode='bilinear': self.transform_func(img, d, mode)))
+                elif self.resolution_routine == 'Incremental_area_factor_2':
+                    all_funcs.append((lambda img, d=self.image_size -self.image_size // 2**(i+1), mode='area': self.transform_func(img, d, mode)))
 
         return all_funcs
 
 
     @torch.no_grad()
-    def sample(self, batch_size = 16, img=None, t=None):
+    def eval_dataset(self, data_loader: torch.utils.data.DataLoader, time_steps=None):
+        l2_direct_recon = []
+        l2_full_recon = []
+        l2_times =[]
+        batch_size = next(iter(data_loader)).shape[0]
+        for data_batch in tqdm(data_loader):
+            data_batch = data_batch.cuda()
+            full_recons, direct_recons, img_times = self.sample(batch_size=batch_size,
+                                                                img_start=data_batch,
+                                                                time_steps=time_steps)
+            l2_full_recon_ = [F.mse_loss(data_batch, recon_).cpu().numpy() for recon_ in full_recons]
+            l2_direct_recon_ = [F.mse_loss(data_batch, recon_).cpu().numpy() for recon_ in direct_recons]
+            l2_times_ = [F.mse_loss(data_batch, recon_).cpu().numpy() for recon_ in img_times]
+            l2_full_recon.append(np.array(l2_full_recon_))
+            l2_direct_recon.append(np.array(l2_direct_recon_))
+            l2_times.append(np.array(l2_times_))
+        l2_full_recon = np.array(l2_full_recon).mean(0)
+        l2_direct_recon = np.array(l2_direct_recon).mean(0)
+        l2_times = np.array(l2_times).mean(0)
 
-        if t==None:
-            t=self.num_timesteps
+        return l2_full_recon, l2_direct_recon, l2_times
 
-        for i in range(t):
+    @torch.no_grad()
+    def sample(self, batch_size = 16, img_start=None, time_steps=None):
+
+        if time_steps==None:
+            time_steps=self.num_timesteps
+        img = img_start
+        img_times = []
+        for i in range(time_steps):
             with torch.no_grad():
                 img = self.func[i](img)
+            img_times.append(img)
 
         # 3(2), 2(1), 1(0)
-        xt = img
-        direct_recons = None
-        while(t):
-            step = torch.full((batch_size,), t - 1, dtype=torch.long).cuda()
-            x = self.denoise_fn(img, step)
+        # xt = img
+        direct_recons = []
+        full_recons = []
+        for t in list(range(time_steps-1, 0, -1)):
+            step = torch.full((batch_size,), t, dtype=torch.long).cuda()
+            with torch.no_grad():
+                x = self.denoise_fn(img, step)
+                direct_recons.append(self.denoise_fn(img_times[t], step))
 
             if self.train_routine == 'Final':
-                if direct_recons == None:
-                    direct_recons = x
+                # if direct_recons == None:
+
 
                 if self.sampling_routine == 'default':
                     for i in range(t-1):
@@ -442,25 +490,29 @@ class GaussianDiffusion(nn.Module):
 
                 elif self.sampling_routine == 'x0_step_down':
                     x_times = x
-                    for i in range(t):
+                    for i in range(t+1):
                         with torch.no_grad():
                             x_times = self.func[i](x_times)
 
                     x_times_sub_1 = x
-                    for i in range(t - 1):
+                    for i in range(t):
                         with torch.no_grad():
                             x_times_sub_1 = self.func[i](x_times_sub_1)
 
                     x = img - x_times + x_times_sub_1
+            elif self.train_routine == 'Step_t':
+                with torch.no_grad():
+                    x = self.q_sample(x, t-1)
+            full_recons.append(x)
 
             img = x
-            t = t - 1
 
-        return xt, direct_recons, img
+
+        return full_recons, direct_recons, img_times
 
     @torch.no_grad()
     def gen_sample(self, batch_size=16, img=None, t=None, times=None, noise_level=0):
-        print("Here?")
+        self.log.info("gen_sample")
         if t == None:
             t = self.num_timesteps
         if times == None:
@@ -488,7 +540,7 @@ class GaussianDiffusion(nn.Module):
                             x_times_sub_1 = self.func[i](x_times_sub_1)
                     x = x_times_sub_1
                 elif self.sampling_routine == 'x0_step_down':
-                    print("x0_step_down")
+                    self.log.info("x0_step_down")
                     x_times = x
                     for i in range(times):
                         with torch.no_grad():
@@ -506,7 +558,7 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     def all_sample(self, batch_size=16, img=None, t=None, times=None):
 
-        print("Here ?")
+        self.log.info("Here ?")
 
         if t == None:
             t = self.num_timesteps
@@ -538,7 +590,7 @@ class GaussianDiffusion(nn.Module):
 
 
                 elif self.sampling_routine == 'x0_step_down':
-                    print("x0_step_down")
+                    self.log.info("x0_step_down")
                     x_times = x
                     for i in range(times):
                         with torch.no_grad():
@@ -582,7 +634,7 @@ class GaussianDiffusion(nn.Module):
 
         # 3(2), 2(1), 1(0)
         while (times):
-            print(times)
+            self.log.info(f"forward_and_backward: {times}")
             step = torch.full((batch_size,), times - 1, dtype=torch.long).cuda()
             x = self.denoise_fn(img, step)
             Backward.append(img)
@@ -597,7 +649,7 @@ class GaussianDiffusion(nn.Module):
                     x = x_times_sub_1
 
                 elif self.sampling_routine == 'x0_step_down':
-                    print("x0_step_down")
+                    self.log.info("forward_and_backward: x0_step_down")
                     x_times = x
                     for i in range(times):
                         with torch.no_grad():
@@ -655,8 +707,8 @@ class GaussianDiffusion(nn.Module):
     def p_losses(self, x_start, t):
         b, c, h, w = x_start.shape
         if self.train_routine == 'Final':
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            x_recon = self.denoise_fn(x_blur, t)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_recon = self.denoise_fn(x_t, t)
 
             if self.loss_type == 'l1':
                 loss = (x_start - x_recon).abs().mean()
@@ -667,8 +719,8 @@ class GaussianDiffusion(nn.Module):
 
         elif self.train_routine == 'Final_small_noise':
             x_start = x_start + 0.001*torch.randn_like(x_start)
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            x_recon = self.denoise_fn(x_blur, t)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_recon = self.denoise_fn(x_t, t)
 
             if self.loss_type == 'l1':
                 loss = (x_start - x_recon).abs().mean()
@@ -688,8 +740,8 @@ class GaussianDiffusion(nn.Module):
 
             x_start = x_start - mean + new_mean
 
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            x_recon = self.denoise_fn(x_blur, t)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_recon = self.denoise_fn(x_t, t)
 
             if self.loss_type == 'l1':
                 loss = (x_start - x_recon).abs().mean()
@@ -700,8 +752,8 @@ class GaussianDiffusion(nn.Module):
 
         elif self.train_routine == 'Final_random_mean_and_actual':
 
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            x_recon = self.denoise_fn(x_blur, t)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_recon = self.denoise_fn(x_t, t)
 
             if self.loss_type == 'l1':
                 loss1 = (x_start - x_recon).abs().mean()
@@ -718,8 +770,8 @@ class GaussianDiffusion(nn.Module):
             mean = torch.mean(x_start, [2, 3], keepdim=True)
             x_start = x_start - mean + new_mean
 
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            x_recon = self.denoise_fn(x_blur, t)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_recon = self.denoise_fn(x_t, t)
 
             if self.loss_type == 'l1':
                 loss2 = (x_start - x_recon).abs().mean()
@@ -732,9 +784,9 @@ class GaussianDiffusion(nn.Module):
 
 
         elif self.train_routine == 'Gradient_norm':
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            grad_pred = self.denoise_fn(x_blur, t)
-            gradient = (x_blur - x_start)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            grad_pred = self.denoise_fn(x_t, t)
+            gradient = (x_t - x_start)
             norm = LA.norm(gradient, dim=(1,2,3), keepdim=True)
             gradient_norm = gradient/(norm + 1e-5)
 
@@ -746,15 +798,46 @@ class GaussianDiffusion(nn.Module):
                 raise NotImplementedError()
 
         elif self.train_routine == 'Step':
-            x_blur = self.q_sample(x_start=x_start, t=t)
-            x_blur_sub = self.q_sample(x_start=x_start, t=t-1)
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_t_sub = self.q_sample(x_start=x_start, t=t-1)
 
-            x_blur_sub_pred = self.denoise_fn(x_blur, t)
+            x_t_sub_pred = self.denoise_fn(x_t, t)
 
             if self.loss_type == 'l1':
-                loss = (x_blur_sub - x_blur_sub_pred).abs().mean()
+                loss = (x_t_sub - x_t_sub_pred).abs().mean()
             elif self.loss_type == 'l2':
-                loss = F.mse_loss(x_blur_sub, x_blur_sub_pred)
+                loss = F.mse_loss(x_t_sub, x_t_sub_pred)
+            else:
+                raise NotImplementedError()
+
+
+        elif self.train_routine == 'Step_t':
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_t_sub = self.q_sample(x_start=x_start, t=t-1)
+            x_t_sub_sub = self.q_sample(x_start=x_start, t=t - 2)
+
+            x_t_sub_pred = self.denoise_fn(x_t, t) # --> t-1
+            x_t_sub_pred_t = self.denoise_fn(x_t_sub_pred, t)# --> t-2
+
+            if self.loss_type == 'l1':
+                loss = (x_t_sub - x_t_sub_pred).abs().mean() +  (x_t_sub_sub - x_t_sub_pred_t).abs().mean()
+            elif self.loss_type == 'l2':
+                loss = F.mse_loss(x_t_sub, x_t_sub_pred) + F.mse_loss(x_t_sub_sub, x_t_sub_pred_t)
+            else:
+                raise NotImplementedError()
+
+        elif self.train_routine == 'Step_two':
+            x_t = self.q_sample(x_start=x_start, t=t)
+            x_t_sub = self.q_sample(x_start=x_start, t=t-1)
+            x_t_sub_sub = self.q_sample(x_start=x_start, t=t - 2)
+
+            x_t_sub_pred = self.denoise_fn(x_t, t)
+            x_t_sub_sub_pred = self.denoise_fn(x_t_sub_pred, t-1)
+
+            if self.loss_type == 'l1':
+                loss = (x_t_sub - x_t_sub_pred).abs().mean() +  (x_t_sub_sub - x_t_sub_sub_pred).abs().mean()
+            elif self.loss_type == 'l2':
+                loss = F.mse_loss(x_t_sub, x_t_sub_pred) + F.mse_loss(x_t_sub_sub, x_t_sub_sub_pred)
             else:
                 raise NotImplementedError()
 
@@ -763,7 +846,12 @@ class GaussianDiffusion(nn.Module):
     def forward(self, x, *args, **kwargs):
         b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
+        if self.train_routine == 'Step':
+            t = torch.randint(1, self.num_timesteps, (b,), device=device).long()
+        elif self.train_routine == 'Step_two':
+            t = torch.randint(1, self.num_timesteps, (b,), device=device).long()
+        else:
+            t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
         return self.p_losses(x, t, *args, **kwargs)
 
 # dataset classes
@@ -838,7 +926,8 @@ class Dataset_Aug2(data.Dataset):
         return self.transform(img)
 
 # trainer class
-
+import logging
+logging.basicConfig(level=logging.INFO)
 class Trainer(object):
     def __init__(
         self,
@@ -859,9 +948,11 @@ class Trainer(object):
         results_folder = './results',
         load_path = None,
         dataset = None,
-        shuffle=True
+        shuffle=True,
+            num_workers=0
     ):
         super().__init__()
+        self.log = logging.getLogger('Train-deblur-diff')
         self.model = diffusion_model
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.model)
@@ -876,15 +967,20 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
 
         if dataset == 'cifar10' or dataset == 'celebA':
-            print(dataset, "DA used")
+            self.log.info(f"{dataset}, DA used")
             self.ds = Dataset_Aug1(folder, image_size)
         elif dataset == 'flower':
-            print(dataset)
+            self.log.info(dataset)
             self.ds = Dataset_Aug2(folder, image_size)
         else:
             self.ds = Dataset(folder, image_size)
 
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=shuffle, pin_memory=True, num_workers=1))
+        self.data_loader_tr = cycle(data.DataLoader(self.ds, batch_size = train_batch_size,
+                                                    shuffle=shuffle, pin_memory=True, num_workers=num_workers))
+        ds_val = torch.utils.data.Subset(self.ds, list(range(int(len(self.ds)*0.005))))
+        self.data_loader_val = data.DataLoader(ds_val, batch_size = 2*train_batch_size,
+                                               drop_last=True,
+                                               shuffle=False, pin_memory=True, num_workers=num_workers)
         self.opt = Adam(diffusion_model.parameters(), lr=train_lr)
 
         self.step = 0
@@ -922,7 +1018,7 @@ class Trainer(object):
         torch.save(data, str(self.results_folder / f'model.pt'))
 
     def load(self, load_path):
-        print("Loading : ", load_path)
+        self.log.info(f"Loading : {load_path}")
         data = torch.load(load_path)
 
         self.step = data['step']
@@ -935,12 +1031,15 @@ class Trainer(object):
         backwards = partial(loss_backwards, self.fp16)
 
         acc_loss = 0
+        log_loss_tr_every = 10
+        val_batch = next(iter(self.data_loader_val)).cuda()
         while self.step < self.train_num_steps:
             u_loss = 0
             for i in range(self.gradient_accumulate_every):
-                data = next(self.dl).cuda()
-                loss = torch.mean(self.model(data))
-                print(f'{self.step}: {loss.item()}')
+                data_batch = next(self.data_loader_tr).cuda()
+                loss = torch.mean(self.model(data_batch))
+                if self.step % log_loss_tr_every == 0:
+                    self.log.info(f'step={self.step}, grad_step={i} loss={loss.item()}')
                 u_loss += loss.item()
                 backwards(loss / self.gradient_accumulate_every, self.opt)
 
@@ -952,35 +1051,53 @@ class Trainer(object):
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
-            if self.step != 0 and self.step % self.save_and_sample_every == 0:
+            if self.step % self.save_and_sample_every == 0:
+
                 milestone = self.step // self.save_and_sample_every
-                batches = self.batch_size
-                og_img = next(self.dl).cuda()
-                xt, direct_recons, all_images = self.ema_model.module.sample(batch_size=batches, img=og_img)
+                self.log.info(f'Save images, step: {self.step}, milestone {milestone}')
+                res_dir = os.path.join(self.results_folder, f'step_{milestone}')
+                os.makedirs(res_dir, exist_ok=True)
 
-                og_img = (og_img + 1) * 0.5
-                utils.save_image(og_img, str(self.results_folder / f'sample-og-{milestone}.png'), nrow=6)
+                # batches = self.batch_size
+                # og_img = next(self.data_loader_tr).cuda()
+                full_recons, direct_recons, img_times = self.ema_model.module.sample(batch_size=val_batch.shape[0],
+                                                                                     img_start=val_batch)
 
-                all_images = (all_images + 1) * 0.5
-                utils.save_image(all_images, str(self.results_folder / f'sample-recon-{milestone}.png'), nrow = 6)
+                orig_img = (val_batch + 1) * 0.5
+                utils.save_image(orig_img, os.path.join(res_dir, f'sample-origin-{milestone}.png'), nrow=6)
 
-                direct_recons = (direct_recons + 1) * 0.5
-                utils.save_image(direct_recons, str(self.results_folder / f'sample-direct_recons-{milestone}.png'), nrow=6)
+                for n_time in range(len(img_times)):
+                    if n_time < len(full_recons):
+                        recon_img = (full_recons[n_time] + 1) * 0.5
+                        recon_file = os.path.join(res_dir, f'sample-recon-{milestone}-t_{n_time}.png')
+                        utils.save_image(recon_img, recon_file, nrow = 6)
 
-                xt = (xt + 1) * 0.5
-                utils.save_image(xt, str(self.results_folder / f'sample-xt-{milestone}.png'),
-                                 nrow=6)
+                    if n_time < len(direct_recons):
+                        direct_recon_img = (direct_recons[n_time] + 1) * 0.5
+                        direct_recon_file = os.path.join(res_dir, f'direct-recon-{milestone}-t_{n_time}.png')
+                        utils.save_image(direct_recon_img, direct_recon_file, nrow=6)
+
+                    if n_time < len(img_times):
+                        xt = (img_times[n_time] + 1) * 0.5
+                        direct_recon_file = os.path.join(res_dir, f'sample-xt-{milestone}-t_{n_time}.png')
+                        utils.save_image(xt, direct_recon_file, nrow=6)
+
+                self.log.info(f"Run Eval step: {self.step}")
+                l2_full_recon, l2_direct_recon, l2_times = self.ema_model.module.eval_dataset(self.data_loader_val)
+                self.log.info(f"Eval data: step: {self.step} "
+                              f"l2_full_recon: {l2_full_recon}, "
+                              f"l2_direct_recon: {l2_direct_recon}, "
+                              f"l2_times: {l2_times}")
 
                 acc_loss = acc_loss/(self.save_and_sample_every+1)
-
-                print(f'Mean of last {self.step}: {acc_loss}')
+                self.log.info(f'Mean of last {self.step}: {acc_loss}')
                 acc_loss=0
 
                 self.save()
 
             self.step += 1
 
-        print('training completed')
+        self.log.info('training completed')
 
 
     def fid_distance_decrease_from_manifold(self, fid_func, start=0, end=1000):
@@ -990,17 +1107,17 @@ class Trainer(object):
         all_samples = []
         dataset = self.ds
 
-        print(len(dataset))
+        self.log.info(f'len_dataset: {len(dataset)}')
         for idx in range(len(dataset)):
             img = dataset[idx]
             img = torch.unsqueeze(img, 0).cuda()
             if idx > start:
                 all_samples.append(img[0])
             if idx % 1000 == 0:
-                print(idx)
+                self.log.info(idx)
             if end != None:
                 if idx == end:
-                    print(idx)
+                    self.log.info(idx)
                     break
 
         all_samples = torch.stack(all_samples)
@@ -1018,7 +1135,7 @@ class Trainer(object):
             og_x = og_x.cuda()
             og_x = og_x.type(torch.cuda.FloatTensor)
             og_img = og_x
-            print(og_img.shape)
+            self.log.info(og_img.shape)
             X_0s, X_ts = self.ema_model.module.all_sample(batch_size=og_img.shape[0], img=og_img, times=None)
 
             og_img = og_img.to('cpu')
@@ -1037,10 +1154,10 @@ class Trainer(object):
             direct_deblurry_imgs = (direct_deblurry_imgs + 1) * 0.5
 
             if cnt == 0:
-                print(og_img.shape)
-                print(blurry_imgs.shape)
-                print(deblurry_imgs.shape)
-                print(direct_deblurry_imgs.shape)
+                self.log.info(og_img.shape)
+                self.log.info(blurry_imgs.shape)
+                self.log.info(deblurry_imgs.shape)
+                self.log.info(direct_deblurry_imgs.shape)
 
                 if sanity_check:
                     folder = './sanity_check/'
@@ -1084,35 +1201,35 @@ class Trainer(object):
 
             cnt += og_img.shape[0]
 
-        print(blurred_samples.shape)
-        print(original_sample.shape)
-        print(deblurred_samples.shape)
-        print(direct_deblurred_samples.shape)
+        self.log.info(blurred_samples.shape)
+        self.log.info(original_sample.shape)
+        self.log.info(deblurred_samples.shape)
+        self.log.info(direct_deblurred_samples.shape)
 
         fid_blur = fid_func(samples=[original_sample, blurred_samples])
         rmse_blur = torch.sqrt(torch.mean( (original_sample - blurred_samples)**2 ))
         ssim_blur = ssim(original_sample, blurred_samples, data_range=1, size_average=True)
-        print(f'The FID of blurry images with original image is {fid_blur}')
-        print(f'The RMSE of blurry images with original image is {rmse_blur}')
-        print(f'The SSIM of blurry images with original image is {ssim_blur}')
+        self.log.info(f'The FID of blurry images with original image is {fid_blur}')
+        self.log.info(f'The RMSE of blurry images with original image is {rmse_blur}')
+        self.log.info(f'The SSIM of blurry images with original image is {ssim_blur}')
 
         fid_deblur = fid_func(samples=[original_sample, deblurred_samples])
         rmse_deblur = torch.sqrt(torch.mean((original_sample - deblurred_samples) ** 2))
         ssim_deblur = ssim(original_sample, deblurred_samples, data_range=1, size_average=True)
-        print(f'The FID of deblurred images with original image is {fid_deblur}')
-        print(f'The RMSE of deblurred images with original image is {rmse_deblur}')
-        print(f'The SSIM of deblurred images with original image is {ssim_deblur}')
+        self.log.info(f'The FID of deblurred images with original image is {fid_deblur}')
+        self.log.info(f'The RMSE of deblurred images with original image is {rmse_deblur}')
+        self.log.info(f'The SSIM of deblurred images with original image is {ssim_deblur}')
 
-        print(f'Hence the improvement in FID using sampling is {fid_blur - fid_deblur}')
+        self.log.info(f'Hence the improvement in FID using sampling is {fid_blur - fid_deblur}')
 
         fid_direct_deblur = fid_func(samples=[original_sample, direct_deblurred_samples])
         rmse_direct_deblur = torch.sqrt(torch.mean((original_sample - direct_deblurred_samples) ** 2))
         ssim_direct_deblur = ssim(original_sample, direct_deblurred_samples, data_range=1, size_average=True)
-        print(f'The FID of direct deblurred images with original image is {fid_direct_deblur}')
-        print(f'The RMSE of direct deblurred images with original image is {rmse_direct_deblur}')
-        print(f'The SSIM of direct deblurred images with original image is {ssim_direct_deblur}')
+        self.log.info(f'The FID of direct deblurred images with original image is {fid_direct_deblur}')
+        self.log.info(f'The RMSE of direct deblurred images with original image is {rmse_direct_deblur}')
+        self.log.info(f'The SSIM of direct deblurred images with original image is {ssim_direct_deblur}')
 
-        print(f'Hence the improvement in FID using direct sampling is {fid_blur - fid_direct_deblur}')
+        self.log.info(f'Hence the improvement in FID using direct sampling is {fid_blur - fid_direct_deblur}')
 
     def sample_as_a_mean_blur_torch_gmm_ablation(self, torch_gmm, siz=2, ch=3, clusters=10, sample_at=6, noise=0):
 
@@ -1124,7 +1241,7 @@ class Trainer(object):
                              drop_last=True)
 
         for i, img in enumerate(dl, 0):
-            print(img.shape)
+            self.log.info(img.shape)
             img = self.ema_model.module.opt(img.cuda(), t=sample_at)
             img = F.interpolate(img, size=siz, mode='area')
             img = flatten(img).cuda()
@@ -1134,7 +1251,7 @@ class Trainer(object):
                 all_samples = torch.cat((all_samples, img), dim=0)
 
         all_samples = all_samples.cuda()
-        print(all_samples.shape)
+        self.log.info(all_samples.shape)
 
         model = torch_gmm(num_components=clusters, trainer_params=dict(gpus=1), covariance_type='full',
                           convergence_tolerance=0.001, batch_size=batch_size)
@@ -1160,11 +1277,11 @@ class Trainer(object):
         bs = 64
         for j in range(100):
             og_img = og_x[j * bs: j * bs + bs]
-            print(og_img.shape)
+            self.log.info(og_img.shape)
             og_img = og_img.expand(bs, ch, 128, 128)
             og_img = og_img.type(torch.cuda.FloatTensor)
 
-            print(og_img.shape)
+            self.log.info(og_img.shape)
             xt, direct_recons, all_images = self.ema_model.module.gen_sample(batch_size=bs, img=og_img, noise_level=noise)
                                                                             
 
